@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Minimal Local VR Player</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body, html { width: 100%; height: 100%; overflow: hidden; background: #0b0b0e; font-family: system-ui, -apple-system, sans-serif; color: #fff; }
+        
+        #app { display: flex; width: 100vw; height: 100vh; position: relative; }
+        
+        /* Sidebar Playlist */
+        #sidebar { width: 300px; background: #141419; border-right: 1px solid #222; display: flex; flex-direction: column; z-index: 10; transition: transform 0.3s ease; }
+        #sidebar.hidden { transform: translateX(-100%); position: absolute; }
+        .sidebar-header { padding: 16px; border-bottom: 1px solid #222; display: flex; flex-direction: column; gap: 10px; }
+        .btn { background: #6366f1; color: white; border: none; padding: 10px 16px; border-radius: 8px; font-weight: 600; cursor: pointer; text-align: center; transition: background 0.2s; }
+        .btn:hover { background: #4f46e5; }
+        .file-list { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 6px; }
+        .file-item { padding: 10px 12px; background: #1e1e24; border-radius: 6px; cursor: pointer; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; transition: background 0.2s; }
+        .file-item:hover { background: #2a2a35; }
+        .file-item.active { background: #6366f1; font-weight: 500; }
+
+        /* Main Viewport */
+        #viewer-container { flex: 1; position: relative; overflow: hidden; display: flex; align-items: center; justify-content: center; background: #000; touch-action: none; }
+        #video-element { display: none; }
+        #canvas { width: 100%; height: 100%; display: block; }
+
+        /* HUD Overlays & Autohide Styling */
+        .hud-overlay {
+            opacity: 1;
+            transition: opacity 0.3s ease-in-out;
+            pointer-events: auto;
+        }
+        .hud-overlay.hidden-hud {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        .hud-top { position: absolute; top: 16px; left: 16px; z-index: 20; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .icon-btn { background: rgba(0,0,0,0.6); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.1); color: white; width: 40px; height: 40px; border-radius: 8px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 18px; }
+        .icon-btn:hover { background: rgba(255,255,255,0.2); }
+
+        .hud-select {
+            background: rgba(0,0,0,0.6);
+            backdrop-filter: blur(8px);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: white;
+            padding: 0 12px;
+            height: 40px;
+            border-radius: 8px;
+            font-size: 13px;
+            cursor: pointer;
+            outline: none;
+        }
+        .hud-select option {
+            background: #141419;
+            color: white;
+        }
+
+        /* Bottom Controls */
+        .controls { position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); width: 90%; max-width: 750px; background: rgba(20,20,25,0.75); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,0.1); padding: 12px 20px; border-radius: 12px; display: flex; flex-direction: column; gap: 8px; z-index: 20; }
+        .controls-row { display: flex; align-items: center; gap: 14px; }
+        .time-display { font-size: 12px; color: #aaa; min-width: 90px; text-align: center; }
+        
+        /* Custom Seekbar */
+        .seekbar-container { flex: 1; position: relative; height: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer; display: flex; align-items: center; }
+        .seekbar { position: absolute; width: 100%; height: 100%; appearance: none; background: transparent; cursor: pointer; z-index: 2; margin: 0; }
+        .seekbar::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #6366f1; cursor: pointer; }
+        .seekbar::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: #6366f1; cursor: pointer; border: none; }
+
+        /* Volume Controls */
+        .volume-container { display: flex; align-items: center; gap: 8px; }
+        .volume-slider { width: 70px; height: 6px; appearance: none; background: rgba(255,255,255,0.2); border-radius: 3px; cursor: pointer; outline: none; }
+        .volume-slider::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; border-radius: 50%; background: #6366f1; cursor: pointer; }
+        .volume-slider::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: #6366f1; cursor: pointer; border: none; }
+
+        @media (max-width: 768px) {
+            #sidebar { position: absolute; height: 100%; width: 280px; transform: translateX(-100%); }
+            #sidebar.mobile-open { transform: translateX(0); }
+            .volume-slider { display: none; } /* Hide slider on smaller screens, keep mute button */
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app">
+        <!-- Sidebar -->
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <h3>VR Playlist</h3>
+                <button class="btn" id="refreshBtn">🔄 Refresh Directory</button>
+            </div>
+            <div class="file-list" id="fileList">
+                <div style="padding: 20px; text-align: center; color: #666; font-size: 13px;">Scanning server directory...</div>
+            </div>
+        </div>
+
+        <!-- Viewport -->
+        <div id="viewer-container">
+            <div class="hud-top hud-overlay" id="hudTop">
+                <button class="icon-btn" id="toggleSidebar" title="Toggle Playlist">☰</button>
+                <button class="icon-btn" id="resetViewBtn" title="Reset View">🎯</button>
+                
+                <select id="projectionSelect" class="hud-select" title="Projection Mode">
+                    <option value="360">360° Sphere</option>
+                    <option value="180">180° Dome</option>
+                    <option value="fisheye">Fisheye</option>
+                </select>
+
+                <select id="formatSelect" class="hud-select" title="3D Format">
+                    <option value="mono">Mono (2D)</option>
+                    <option value="sbs-left">SBS (Left Eye)</option>
+                    <option value="sbs-right">SBS (Right Eye)</option>
+                    <option value="tb-top">Top/Bottom (Top)</option>
+                    <option value="tb-bottom">Top/Bottom (Bottom)</option>
+                </select>
+            </div>
+
+            <video id="video-element" crossorigin="anonymous" playsinline webkit-playsinline preload="auto" loop></video>
+            <canvas id="canvas"></canvas>
+
+            <!-- Playback Control Bar -->
+            <div class="controls hud-overlay" id="controls">
+                <div class="controls-row">
+                    <button class="icon-btn" id="playPauseBtn" style="width:36px; height:36px; font-size:14px;">▶</button>
+                    <div class="time-display" id="timeDisplay">00:00 / 00:00</div>
+                    <div class="seekbar-container">
+                        <input type="range" class="seekbar" id="seekSlider" min="0" max="100" value="0" step="0.1">
+                    </div>
+                    <!-- Volume Controls -->
+                    <div class="volume-container">
+                        <button class="icon-btn" id="muteBtn" style="width:36px; height:36px; font-size:14px;" title="Mute/Unmute">🔊</button>
+                        <input type="range" class="volume-slider" id="volumeSlider" min="0" max="1" step="0.01" value="1">
+                    </div>
+                    <button class="icon-btn" id="fullscreenBtn" style="width:36px; height:36px; font-size:14px;">⛶</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video-element');
+        const canvas = document.getElementById('canvas');
+        const refreshBtn = document.getElementById('refreshBtn');
+        const fileListEl = document.getElementById('fileList');
+        const playPauseBtn = document.getElementById('playPauseBtn');
+        const seekSlider = document.getElementById('seekSlider');
+        const timeDisplay = document.getElementById('timeDisplay');
+        const toggleSidebarBtn = document.getElementById('toggleSidebar');
+        const sidebar = document.getElementById('sidebar');
+        const resetViewBtn = document.getElementById('resetViewBtn');
+        const fullscreenBtn = document.getElementById('fullscreenBtn');
+        const muteBtn = document.getElementById('muteBtn');
+        const volumeSlider = document.getElementById('volumeSlider');
+        const hudTop = document.getElementById('hudTop');
+        const controls = document.getElementById('controls');
+        const container = document.getElementById('viewer-container');
+        const projectionSelect = document.getElementById('projectionSelect');
+        const formatSelect = document.getElementById('formatSelect');
+
+        let gl, program, sphereMesh360, domeMesh180, planeMeshFisheye;
+        let videoTexture = null;
+        let isPlaying = false;
+        
+        let cameraRotationX = 0; 
+        let cameraRotationY = 0; 
+        let cameraZoom = 1.0;      
+        let isDragging = false;
+        let lastMouseX = 0, lastMouseY = 0;
+        let initialPinchDistance = null;
+
+        let currentProjection = '360';
+        let currentFormatInt = 0; // 0: Mono, 1: SBS-Left, 2: SBS-Right, 3: TB-Top, 4: TB-Bottom
+
+        // --- Autohide Controls Logic ---
+        let hideHudTimer = null;
+        let hudVisible = true;
+
+        function showHUD() {
+            hudTop.classList.remove('hidden-hud');
+            controls.classList.remove('hidden-hud');
+            hudVisible = true;
+            resetHideTimer();
+        }
+
+        function hideHUD() {
+            if (isPlaying) {
+                hudTop.classList.add('hidden-hud');
+                controls.classList.add('hidden-hud');
+                hudVisible = false;
+            }
+        }
+
+        function resetHideTimer() {
+            clearTimeout(hideHudTimer);
+            if (isPlaying) {
+                hideHudTimer = setTimeout(hideHUD, 1000);
+            }
+        }
+
+        container.addEventListener('mousemove', showHUD);
+        container.addEventListener('touchstart', showHUD);
+        controls.addEventListener('mouseenter', () => clearTimeout(hideHudTimer));
+        controls.addEventListener('mouseleave', resetHideTimer);
+
+        let clickStartPos = { x: 0, y: 0 };
+        container.addEventListener('mousedown', (e) => {
+            clickStartPos = { x: e.clientX, y: e.clientY };
+            isDragging = true; 
+            lastMouseX = e.clientX; 
+            lastMouseY = e.clientY; 
+        });
+
+        container.addEventListener('click', (e) => {
+            const dist = Math.hypot(e.clientX - clickStartPos.x, e.clientY - clickStartPos.y);
+            if (dist < 5) {
+                if (hudVisible) {
+                    hideHUD();
+                } else {
+                    showHUD();
+                }
+            }
+        });
+
+        // --- Auto-scan Server Directory ---
+        async function fetchServerFiles() {
+            fileListEl.innerHTML = `<div style="padding: 20px; text-align: center; color: #666; font-size: 13px;">Scanning folder...</div>`;
+            try {
+                const response = await fetch('/api/files');
+                const files = await response.json();
+                buildPlaylist(files);
+            } catch (err) {
+                console.error("Failed to scan directory:", err);
+                fileListEl.innerHTML = `<div style="padding: 20px; text-align: center; color: #f87171; font-size: 13px;">Error scanning server directory. Make sure server.py is running.</div>`;
+            }
+        }
+
+        refreshBtn.addEventListener('click', fetchServerFiles);
+
+        function buildPlaylist(files) {
+            fileListEl.innerHTML = '';
+            
+            if (!files || files.length === 0) {
+                fileListEl.innerHTML = `<div style="padding: 20px; text-align: center; color: #666; font-size: 13px;">No video files found in server folder.</div>`;
+                return;
+            }
+
+            files.forEach((filename) => {
+                const item = document.createElement('div');
+                item.className = 'file-item';
+                item.textContent = filename;
+                item.addEventListener('click', () => {
+                    document.querySelectorAll('.file-item').forEach(el => el.classList.remove('active'));
+                    item.classList.add('active');
+                    loadVideoFile(filename);
+                });
+                fileListEl.appendChild(item);
+            });
+
+            if (files.length > 0) {
+                fileListEl.firstChild.classList.add('active');
+                loadVideoFile(files[0]);
+            }
+        }
+
+        function loadVideoFile(filename) {
+            video.src = encodeURIComponent(filename);
+            video.load();
+            video.pause();
+            isPlaying = false;
+            playPauseBtn.textContent = '▶';
+            showHUD();
+        }
+
+        // --- WebGL Setup ---
+        function initWebGL() {
+            gl = canvas.getContext('webgl', { preserveDrawingBuffer: false, powerPreference: 'high-performance' });
+            if (!gl) { alert('WebGL not supported!'); return; }
+
+            const vsSource = `
+                attribute vec3 aPosition;
+                attribute vec2 aTexCoord;
+                uniform mat4 uMVPMatrix;
+                varying vec2 vTexCoord;
+                void main() {
+                    gl_Position = uMVPMatrix * vec4(aPosition, 1.0);
+                    vTexCoord = vec2(1.0 - aTexCoord.x, aTexCoord.y);
+                }
+            `;
+            const fsSource = `
+                precision mediump float;
+                varying vec2 vTexCoord;
+                uniform sampler2D uSampler;
+                uniform int uFormat; // 0: Mono, 1: SBS-Left, 2: SBS-Right, 3: TB-Top, 4: TB-Bottom
+
+                void main() {
+                    vec2 uv = vTexCoord;
+
+                    if (uFormat == 1) { // SBS-Left
+                        uv.x = uv.x * 0.5;
+                    } else if (uFormat == 2) { // SBS-Right
+                        uv.x = uv.x * 0.5 + 0.5;
+                    } else if (uFormat == 3) { // TB-Top
+                        uv.y = uv.y * 0.5;
+                    } else if (uFormat == 4) { // TB-Bottom
+                        uv.y = uv.y * 0.5 + 0.5;
+                    }
+
+                    gl_FragColor = texture2D(uSampler, uv);
+                }
+            `;
+
+            const shaderProgram = createShaderProgram(gl, vsSource, fsSource);
+            program = {
+                program: shaderProgram,
+                attribLocations: {
+                    position: gl.getAttribLocation(shaderProgram, 'aPosition'),
+                    texCoord: gl.getAttribLocation(shaderProgram, 'aTexCoord'),
+                },
+                uniformLocations: {
+                    mvpMatrix: gl.getUniformLocation(shaderProgram, 'uMVPMatrix'),
+                    sampler: gl.getUniformLocation(shaderProgram, 'uSampler'),
+                    format: gl.getUniformLocation(shaderProgram, 'uFormat'),
+                },
+            };
+
+            sphereMesh360 = createSphere(50, 50, 10);
+            domeMesh180 = createDome(50, 50, 10);
+            planeMeshFisheye = createPlane();
+            
+            videoTexture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+            requestAnimationFrame(render);
+        }
+
+        function createShaderProgram(gl, vs, fs) {
+            const vShader = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vShader, vs); gl.compileShader(vShader);
+            const fShader = gl.createShader(gl.FRAGMENT_SHADER);
+            gl.shaderSource(fShader, fs); gl.compileShader(fShader);
+            const prog = gl.createProgram();
+            gl.attachShader(prog, vShader); gl.attachShader(prog, fShader);
+            gl.linkProgram(prog);
+            return prog;
+        }
+
+        function createSphere(latBands, longBands, radius) {
+            const positions = [], texCoords = [], indices = [];
+            for (let lat = 0; lat <= latBands; lat++) {
+                const theta = lat * Math.PI / latBands;
+                const sinTheta = Math.sin(theta), cosTheta = Math.cos(theta);
+                for (let long = 0; long <= longBands; long++) {
+                    const phi = long * 2 * Math.PI / longBands;
+                    positions.push(radius * Math.cos(phi) * sinTheta, radius * cosTheta, radius * Math.sin(phi) * sinTheta);
+                    texCoords.push(1.0 - (long / longBands), lat / latBands);
+                }
+            }
+            for (let lat = 0; lat < latBands; lat++) {
+                for (let long = 0; long < longBands; long++) {
+                    const first = (lat * (longBands + 1)) + long;
+                    const second = first + longBands + 1;
+                    indices.push(first, second, first + 1, second, second + 1, first + 1);
+                }
+            }
+            const posBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+            const texBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, texBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texCoords), gl.STATIC_DRAW);
+            const indexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+            return { posBuffer, texBuffer, indexBuffer, numIndices: indices.length };
+        }
+
+        function createDome(latBands, longBands, radius) {
+            const positions = [], texCoords = [], indices = [];
+            for (let lat = 0; lat <= latBands; lat++) {
+                const theta = lat * Math.PI / latBands;
+                const sinTheta = Math.sin(theta), cosTheta = Math.cos(theta);
+                for (let long = 0; long <= longBands; long++) {
+                    const phi = (long * Math.PI / longBands) - (Math.PI / 2);
+                    positions.push(radius * Math.cos(phi) * sinTheta, radius * cosTheta, radius * Math.sin(phi) * sinTheta);
+                    texCoords.push(1.0 - (long / longBands), lat / latBands);
+                }
+            }
+            for (let lat = 0; lat < latBands; lat++) {
+                for (let long = 0; long < longBands; long++) {
+                    const first = (lat * (longBands + 1)) + long;
+                    const second = first + longBands + 1;
+                    indices.push(first, second, first + 1, second, second + 1, first + 1);
+                }
+            }
+            const posBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+            const texBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, texBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texCoords), gl.STATIC_DRAW);
+            const indexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+            return { posBuffer, texBuffer, indexBuffer, numIndices: indices.length };
+        }
+
+        function createPlane() {
+            const positions = [-2, -2, 0,  2, -2, 0,  2, 2, 0,  -2, 2, 0];
+            const texCoords = [0, 1,  1, 1,  1, 0,  0, 0];
+            const indices = [0, 1, 2,  0, 2, 3];
+            const posBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+            const texBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, texBuffer); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(texCoords), gl.STATIC_DRAW);
+            const indexBuffer = gl.createBuffer();
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+            return { posBuffer, texBuffer, indexBuffer, numIndices: indices.length };
+        }
+
+        function mat4Perspective(fov, aspect, near, far) {
+            const f = 1.0 / Math.tan(fov / 2);
+            const out = new Float32Array(16);
+            out[0] = f / aspect; out[5] = f; out[10] = (far + near) / (near - far);
+            out[11] = -1; out[14] = (2 * far * near) / (near - far);
+            return out;
+        }
+
+        function mat4Multiply(a, b) {
+            const out = new Float32Array(16);
+            for (let i = 0; i < 4; i++) {
+                for (let j = 0; j < 4; j++) {
+                    out[j * 4 + i] = a[0 * 4 + i] * b[j * 4 + 0] + a[1 * 4 + i] * b[j * 4 + 1] + a[2 * 4 + i] * b[j * 4 + 2] + a[3 * 4 + i] * b[j * 4 + 3];
+                }
+            }
+            return out;
+        }
+
+        function mat4RotateX(m, angle) {
+            const c = Math.cos(angle), s = Math.sin(angle), out = new Float32Array(m);
+            out[4] = m[4] * c + m[8] * s; out[5] = m[5] * c + m[9] * s; out[6] = m[6] * c + m[10] * s;
+            out[8] = m[8] * c - m[4] * s; out[9] = m[9] * c - m[5] * s; out[10] = m[10] * c - m[6] * s;
+            return out;
+        }
+
+        function mat4RotateY(m, angle) {
+            const c = Math.cos(angle), s = Math.sin(angle), out = new Float32Array(m);
+            out[0] = m[0] * c - m[8] * s; out[1] = m[1] * c - m[9] * s; out[2] = m[2] * c - m[10] * s;
+            out[8] = m[0] * s + m[8] * c; out[9] = m[1] * s + m[9] * c; out[10] = m[2] * s + m[10] * c;
+            return out;
+        }
+
+        function mat4Identity() {
+            const out = new Float32Array(16);
+            out[0] = 1; out[5] = 1; out[10] = 1; out[15] = 1;
+            return out;
+        }
+
+        function render() {
+            if (canvas.width !== canvas.clientWidth || canvas.height !== canvas.clientHeight) {
+                canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight;
+                gl.viewport(0, 0, canvas.width, canvas.height);
+            }
+            gl.clearColor(0.05, 0.05, 0.07, 1.0);
+            gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+            gl.enable(gl.DEPTH_TEST);
+
+            if (video.readyState >= video.HAVE_CURRENT_DATA) {
+                gl.bindTexture(gl.TEXTURE_2D, videoTexture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+            }
+
+            gl.useProgram(program.program);
+            gl.uniform1i(program.uniformLocations.format, currentFormatInt);
+
+            const aspect = canvas.width / canvas.height;
+            const fov = (75 * Math.PI / 180) / cameraZoom;
+            const projectionMatrix = mat4Perspective(fov, aspect, 0.1, 100.0);
+            
+            let mvMatrix = mat4Identity();
+            if (currentProjection !== 'fisheye') {
+                mvMatrix = mat4RotateX(mvMatrix, cameraRotationX);
+                mvMatrix = mat4RotateY(mvMatrix, cameraRotationY);
+            }
+
+            gl.uniformMatrix4fv(program.uniformLocations.mvpMatrix, false, mat4Multiply(projectionMatrix, mvMatrix));
+
+            let activeMesh = sphereMesh360;
+            if (currentProjection === '180') activeMesh = domeMesh180;
+            else if (currentProjection === 'fisheye') activeMesh = planeMeshFisheye;
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, activeMesh.posBuffer);
+            gl.enableVertexAttribArray(program.attribLocations.position);
+            gl.vertexAttribPointer(program.attribLocations.position, 3, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ARRAY_BUFFER, activeMesh.texBuffer);
+            gl.enableVertexAttribArray(program.attribLocations.texCoord);
+            gl.vertexAttribPointer(program.attribLocations.texCoord, 2, gl.FLOAT, false, 0, 0);
+
+            gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, activeMesh.indexBuffer);
+            gl.drawElements(gl.TRIANGLES, activeMesh.numIndices, gl.UNSIGNED_SHORT, 0);
+
+            requestAnimationFrame(render);
+        }
+
+        // --- Interaction Controls ---
+        window.addEventListener('mousemove', (e) => {
+            if (!isDragging || currentProjection === 'fisheye') return;
+            cameraRotationY += (e.clientX - lastMouseX) * 0.005;
+            cameraRotationX = Math.max(-Math.PI/2, Math.min(Math.PI/2, cameraRotationX + (e.clientY - lastMouseY) * 0.005));
+            lastMouseX = e.clientX; lastMouseY = e.clientY;
+        });
+        window.addEventListener('mouseup', () => { isDragging = false; });
+
+        container.addEventListener('touchstart', (e) => {
+            if (e.touches.length === 1) {
+                isDragging = true; lastMouseX = e.touches[0].clientX; lastMouseY = e.touches[0].clientY;
+            } else if (e.touches.length === 2) {
+                isDragging = false; initialPinchDistance = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+            }
+        }, { passive: true });
+
+        container.addEventListener('touchmove', (e) => {
+            if (isDragging && e.touches.length === 1 && currentProjection !== 'fisheye') {
+                cameraRotationY += (e.touches[0].clientX - lastMouseX) * 0.005;
+                cameraRotationX = Math.max(-Math.PI/2, Math.min(Math.PI/2, cameraRotationX + (e.touches[0].clientY - lastMouseY) * 0.005));
+                lastMouseX = e.touches[0].clientX; lastMouseY = e.touches[0].clientY;
+            } else if (e.touches.length === 2 && initialPinchDistance) {
+                const dist = Math.hypot(e.touches[0].clientX - e.touches[1].clientX, e.touches[0].clientY - e.touches[1].clientY);
+                cameraZoom = Math.max(0.5, Math.min(3.0, cameraZoom * (dist > initialPinchDistance ? 1.02 : 0.98)));
+                initialPinchDistance = dist;
+            }
+        }, { passive: true });
+
+        container.addEventListener('touchend', () => { isDragging = false; initialPinchDistance = null; });
+
+        // --- Wheel/Trackpad Handling ---
+        let targetSeekTime = 0;
+        let isSeekingViaTrackpad = false;
+        let gestureLock = null;
+        let gestureTimeout = null;
+
+        container.addEventListener('wheel', (e) => {
+            e.preventDefault();
+
+            clearTimeout(gestureTimeout);
+            gestureTimeout = setTimeout(() => {
+                gestureLock = null;
+            }, 120);
+
+            if (!gestureLock) {
+                if (Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.5) {
+                    gestureLock = 'seek';
+                } else if (Math.abs(e.deltaY) > Math.abs(e.deltaX) * 1.5) {
+                    gestureLock = 'zoom';
+                } else {
+                    return;
+                }
+            }
+
+            if (gestureLock === 'seek') {
+                if (!isNaN(video.duration) && video.duration > 0) {
+                    if (!isSeekingViaTrackpad) {
+                        isSeekingViaTrackpad = true;
+                        targetSeekTime = video.currentTime;
+                    }
+                    
+                    const seekSensitivity = 0.03; 
+                    targetSeekTime += (-e.deltaX) * seekSensitivity;
+                    targetSeekTime = Math.max(0, Math.min(video.duration, targetSeekTime));
+                    
+                    video.currentTime = targetSeekTime;
+                    
+                    showHUD();
+                    resetHideTimer();
+
+                    clearTimeout(window.trackpadSeekTimeout);
+                    window.trackpadSeekTimeout = setTimeout(() => {
+                        isSeekingViaTrackpad = false;
+                    }, 150);
+                }
+            } else if (gestureLock === 'zoom') {
+                cameraZoom = Math.max(0.5, Math.min(3.0, cameraZoom + (e.deltaY * -0.001)));
+            }
+        }, { passive: false });
+
+        resetViewBtn.addEventListener('click', () => { cameraRotationX = 0; cameraRotationY = 0; cameraZoom = 1.0; });
+
+        playPauseBtn.addEventListener('click', () => {
+            if (video.paused) {
+                video.play();
+                playPauseBtn.textContent = '❚❚';
+                isPlaying = true;
+                resetHideTimer();
+            } else {
+                video.pause();
+                playPauseBtn.textContent = '▶';
+                isPlaying = false;
+                clearTimeout(hideHudTimer);
+                showHUD();
+            }
+        });
+
+        // --- Volume Control Logic ---
+        video.volume = 1.0;
+
+        volumeSlider.addEventListener('input', (e) => {
+            const val = parseFloat(e.target.value);
+            video.volume = val;
+            video.muted = (val === 0);
+            updateVolumeIcon();
+        });
+
+        muteBtn.addEventListener('click', () => {
+            video.muted = !video.muted;
+            if (video.muted) {
+                volumeSlider.value = 0;
+            } else {
+                volumeSlider.value = video.volume > 0 ? video.volume : 1;
+                video.volume = volumeSlider.value;
+            }
+            updateVolumeIcon();
+        });
+
+        function updateVolumeIcon() {
+            if (video.muted || video.volume === 0) {
+                muteBtn.textContent = '🔇';
+            } else if (video.volume < 0.5) {
+                muteBtn.textContent = '🔉';
+            } else {
+                muteBtn.textContent = '🔊';
+            }
+        }
+
+        video.addEventListener('volumechange', () => {
+            volumeSlider.value = video.muted ? 0 : video.volume;
+            updateVolumeIcon();
+        });
+
+        video.addEventListener('timeupdate', () => {
+            if (!isNaN(video.duration) && !isSeekingViaTrackpad) {
+                seekSlider.value = (video.currentTime / video.duration) * 100;
+                timeDisplay.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+            }
+        });
+
+        seekSlider.addEventListener('input', (e) => {
+            if (!isNaN(video.duration)) video.currentTime = (e.target.value / 100) * video.duration;
+        });
+
+        function formatTime(s) {
+            return `${Math.floor(s/60).toString().padStart(2,'0')}:${Math.floor(s%60).toString().padStart(2,'0')}`;
+        }
+
+        toggleSidebarBtn.addEventListener('click', () => {
+            if (window.innerWidth <= 768) sidebar.classList.toggle('mobile-open');
+            else sidebar.classList.toggle('hidden');
+        });
+
+        fullscreenBtn.addEventListener('click', () => {
+            const appContainer = document.getElementById('app');
+            if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+                if (appContainer.requestFullscreen) appContainer.requestFullscreen();
+                else if (appContainer.webkitRequestFullscreen) appContainer.webkitRequestFullscreen();
+                else if (video.webkitEnterFullScreen) video.webkitEnterFullScreen();
+            } else {
+                if (document.exitFullscreen) document.exitFullscreen();
+                else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+            }
+        });
+
+        // --- UI Selectors Listeners ---
+        projectionSelect.addEventListener('change', (e) => {
+            currentProjection = e.target.value;
+        });
+
+        formatSelect.addEventListener('change', (e) => {
+            const val = e.target.value;
+            switch(val) {
+                case 'mono': currentFormatInt = 0; break;
+                case 'sbs-left': currentFormatInt = 1; break;
+                case 'sbs-right': currentFormatInt = 2; break;
+                case 'tb-top': currentFormatInt = 3; break;
+                case 'tb-bottom': currentFormatInt = 4; break;
+            }
+        });
+
+        // --- Keyboard Shortcuts ---
+        window.addEventListener('keydown', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+
+            switch (e.code) {
+                case 'Space':
+                case 'KeyK':
+                    e.preventDefault();
+                    playPauseBtn.click();
+                    break;
+                case 'KeyF':
+                    e.preventDefault();
+                    fullscreenBtn.click();
+                    break;
+                case 'KeyM':
+                    e.preventDefault();
+                    muteBtn.click();
+                    break;
+                case 'ArrowLeft':
+                    e.preventDefault();
+                    if (!isNaN(video.duration)) {
+                        video.currentTime = Math.max(0, video.currentTime - 5);
+                        showHUD();
+                    }
+                    break;
+                case 'ArrowRight':
+                    e.preventDefault();
+                    if (!isNaN(video.duration)) {
+                        video.currentTime = Math.min(video.duration, video.currentTime + 5);
+                        showHUD();
+                    }
+                    break;
+                case 'ArrowUp':
+                    e.preventDefault();
+                    video.volume = Math.min(1.0, video.volume + 0.1);
+                    showHUD();
+                    break;
+                case 'ArrowDown':
+                    e.preventDefault();
+                    video.volume = Math.max(0.0, video.volume - 0.1);
+                    showHUD();
+                    break;
+            }
+        });
+
+        // Initialize application
+        fetchServerFiles();
+        initWebGL();
+    </script>
+</body>
+</html>
